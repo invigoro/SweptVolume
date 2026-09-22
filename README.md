@@ -170,10 +170,8 @@ ending joint angles. Labels are swept volume in liters.
 
 ## 2. Running the experiments
 
-> Status: `make_dataset_npz.py`, `neural_network.py`, `sweep.py`, and
-> `aggregate.py` are implemented and verified. `plots.py` and `final_test.py`
-> are not written yet; the sections covering plotting and final held-out testing
-> will be filled in as those land.
+> Status: the full pipeline is implemented and the required GPU sweep has been
+> run. Final held-out testing has not been performed yet.
 
 ### 2.1 Quick test
 
@@ -320,7 +318,61 @@ complete, so a partially finished sweep cannot be mistaken for a complete one.
 > faithfully and stand out immediately in the summary table; they should be
 > reported as observed rather than quietly dropped.
 
-### 2.5 Methodology notes
+### 2.5 Figures
+
+```bash
+python3 plots.py                       # every figure from runs/gpu_arch -> plots/
+python3 plots.py --only depth width    # just the two required figures
+python3 plots.py --experiment selfdirected
+```
+
+Each figure is written as both PNG (for viewing) and PDF (vector, for the
+report). Every curve summarises the five replicate seeds as a mean with a
++/- 1 standard deviation band; no figure shows a single seed.
+
+| Figure | Contents |
+|---|---|
+| `eval_rmse_vs_epoch_depth` | **Required.** Evaluation RMSE vs epoch for 1/2/3 hidden layers at fixed width. |
+| `eval_rmse_vs_epoch_width` | **Required.** Evaluation RMSE vs epoch for 32/64/128/256 neurons at fixed depth. |
+| `eval_rmse_grid` | Small multiples: all 12 conditions, one panel per depth. |
+| `best_rmse_vs_parameters` | Best evaluation RMSE against trainable parameter count, separating depth from raw capacity. |
+| `train_time_vs_architecture` | Training time by architecture. |
+| `best_epoch_by_condition` | Diagnostic: which epoch produced the best evaluation score. |
+| `train_vs_eval_rmse` | Diagnostic: training versus evaluation error, for the overfitting question. |
+
+Two presentation choices worth stating in the report:
+
+- **Ordered series use a single-hue light-to-dark ramp**, not unrelated colours,
+  because depth and width are ordered quantities. The ramp steps were checked for
+  monotone lightness, adjacent lightness separation, and contrast against the
+  chart surface.
+- **Per-epoch evaluation error is noisy** at batch size 10,000, and that noise is
+  larger than the spread between seeds. Each seed's curve is therefore smoothed
+  with a 25-epoch centred moving average *before* averaging across seeds, so the
+  band shows seed-to-seed variability rather than epoch-to-epoch jitter. The
+  unsmoothed mean is always drawn faintly behind the smoothed curve, so the
+  smoothing never hides the underlying signal.
+
+### 2.6 Final held-out testing
+
+Run this **once**, only after the final configuration has been chosen from
+evaluation results:
+
+```bash
+python3 final_test.py --experiment gpu_arch \
+    --hidden-layers 3 --neurons 256 --confirm
+```
+
+This is the only code path that reads the testing arrays. It loads the best
+retained checkpoint from each of the five seeds, applies each checkpoint's own
+stored normalization statistics, and reports mean and standard deviation of test
+MSE (liters^2) and test RMSE (liters). It writes `test_metrics.json` into each run
+directory; re-run `aggregate.py` afterwards to fold those into `results.csv`.
+
+`--confirm` is mandatory. Without it the script refuses and exits 2, so the
+held-out data cannot be touched by an absent-minded command.
+
+### 2.7 Methodology notes
 
 These are properties of the implementation that the report needs to state:
 
@@ -460,7 +512,13 @@ must be documented in the report.
 |-- verify_env.py              environment verification script
 |-- make_dataset_npz.py        packs source_data/*.npy into swept_volume_data.npz
 |-- neural_network.py          NeuralNetwork class + single-run training program
+|-- sweep.py                   runs a grid of configurations x replicate seeds
+|-- aggregate.py               runs/ -> results.csv + per-condition summary
+|-- plots.py                   report figures -> plots/
+|-- final_test.py              held-out testing for the selected configuration
 |-- runs/                      one directory per experimental run
+|-- results.csv                one row per run
+|-- plots/                     figures used in the report
 |-- source_data/               local copy of the dataset (.npy), not committed
 |-- venv_gpu/                  virtual environment, not committed
 `-- swept_volume_data.npz      built by make_dataset_npz.py, not committed
