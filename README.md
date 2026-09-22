@@ -8,9 +8,8 @@ in PyTorch.
 - **Assignment choice:** GPU — Network Architecture Analysis
 - **Name:** Timothy Wells
 
-> Status: environment setup complete. Experiment code (`neural_network.py`,
-> `sweep.py`, `aggregate.py`, `plots.py`, `final_test.py`) is not written yet; the
-> sections describing how to run experiments will be filled in as those land.
+> Status: environment setup and the single-run training program are complete.
+> `sweep.py`, `aggregate.py`, `plots.py`, and `final_test.py` are still to come.
 
 ---
 
@@ -171,13 +170,185 @@ ending joint angles. Labels are swept volume in liters.
 
 ## 2. Running the experiments
 
-> To be completed when the experiment code lands. This section will document:
-> the exact command to run one configuration with one seed, the exact quick-test
-> command, how to aggregate independent runs into the full sweep, how to run
-> final held-out testing after configuration selection, and a description of the
-> output files.
+> Status: `make_dataset_npz.py`, `neural_network.py`, `sweep.py`, and
+> `aggregate.py` are implemented and verified. `plots.py` and `final_test.py`
+> are not written yet; the sections covering plotting and final held-out testing
+> will be filled in as those land.
 
----
+### 2.1 Quick test
+
+Checks that the implementation is runnable: loads the data, computes and applies
+training-derived normalization, builds a network, trains briefly on a small
+subset, and runs the evaluation pipeline. It never loads the held-out testing
+set, and it does not replace the required experiments.
+
+```bash
+python3 neural_network.py --quick-test
+```
+
+Exits 0 and prints `Quick test PASSED.` on success.
+
+### 2.2 One configuration, one seed
+
+Each invocation of `neural_network.py` trains exactly one configuration with one
+replicate seed, so runs are independent and may be distributed across machines
+and combined afterwards. A run of the required GPU sweep:
+
+```bash
+python3 neural_network.py \
+    --experiment gpu_arch \
+    --hidden-layers 2 \
+    --neurons 128 \
+    --lr 1e-3 \
+    --batch-size 10000 \
+    --train-size 100000 \
+    --epochs 1000 \
+    --seed 0 \
+    --device cuda
+```
+
+Every argument except `--seed` has a default matching the required GPU condition
+(`--hidden-layers 2 --neurons 128 --lr 1e-3 --batch-size 10000 --train-size
+100000 --epochs 1000 --device auto`), so the shortest equivalent form is:
+
+```bash
+python3 neural_network.py --hidden-layers 2 --neurons 128 --seed 0
+```
+
+The required sweep is `--hidden-layers` in {1, 2, 3} crossed with `--neurons` in
+{32, 64, 128, 256}, each with `--seed` in {0, 1, 2, 3, 4}: 12 conditions x 5
+seeds = 60 runs.
+
+**Useful options**
+
+| Option | Purpose |
+|---|---|
+| `--experiment NAME` | Groups runs under `runs/NAME/`. Use a distinct name per investigation (`gpu_arch`, `selfdirected`, `followup`). |
+| `--tag LABEL` | Extra label folded into the run directory name, to separate runs that would otherwise collide. |
+| `--feature-encoding sincos` | Self-directed variant: replaces each joint angle with `(sin, cos)`, giving 28 inputs. |
+| `--device` | `auto` (default), `cuda`, `cuda:N`, or `cpu`. |
+| `--replace` | Overwrite an existing completed run. Without it the program refuses and exits 2. |
+| `--any-seed` | Allow a seed outside the five required replicate seeds. |
+| `--no-train-metric` | Skip the per-epoch full-training-set error (kept by default for the train-versus-evaluation diagnostic plot; it is excluded from the reported training time). |
+| `--quiet` | Suppress per-epoch progress output. |
+| `--data`, `--data-dir` | Override the dataset location. |
+
+> The run directory name does not encode the device, because device is not an
+> experimental condition. If you deliberately want CPU and GPU runs of the *same*
+> configuration side by side, separate them with `--experiment` or `--tag`;
+> otherwise the second run is refused rather than silently overwriting the first.
+
+### 2.3 Output files
+
+Each run writes to
+`runs/<experiment>/h<L>_n<W>_lr<LR>_bs<B>_ntrain<N>_ep<E>[_<enc>][_<tag>]_seed<S>/`:
+
+| File | Contents |
+|---|---|
+| `config.json` | Full run configuration and environment (Python, PyTorch, CUDA, GPU name, compute capability, git commit). |
+| `summary.json` | The above plus best evaluation RMSE and MSE, best epoch, `train_time_s`, `total_time_s`, parameter count, optimizer steps, and `status`. |
+| `history.npz` | Per-epoch arrays: `epoch`, `train_loss_norm`, `eval_mse_norm`, `eval_rmse_liters`, `train_rmse_liters`, `epoch_time_s`. |
+| `best_model.pt` | The state dict from the best-evaluating epoch, **together with the normalization statistics** needed to apply it to raw features later. |
+
+A run whose `summary.json` already exists is refused (exit code 2) unless
+`--replace` is passed, so an accidental re-run cannot destroy existing results.
+
+### 2.4 Aggregating independent runs into the full sweep
+
+`sweep.py` enumerates a grid, skips runs that are already complete, and reports
+progress. It is only a driver: every run it performs is identical to one launched
+by hand with `neural_network.py`, so a sweep can be interrupted, resumed, or
+split across machines freely.
+
+```bash
+python3 sweep.py --sweep gpu_arch            # the required 12 conditions x 5 seeds
+python3 sweep.py --sweep gpu_arch --dry-run  # list what would run, change nothing
+```
+
+Runs execute **in-process** by default. These networks train in a few seconds, so
+a fresh `import torch` per run would dominate both the wall clock and the timing
+comparison; pass `--subprocess` if full per-run isolation is wanted instead.
+
+**Splitting across machines.** `--shard I/N` takes a disjoint slice of the grid,
+and the three shards together cover it exactly once:
+
+```bash
+python3 sweep.py --sweep gpu_arch --shard 1/3    # machine 1
+python3 sweep.py --sweep gpu_arch --shard 2/3    # machine 2
+python3 sweep.py --sweep gpu_arch --shard 3/3    # machine 3
+```
+
+Copy each machine's `runs/` directory into one place afterwards and aggregate.
+Note that **timing results must come from a single machine** to be comparable, so
+shard only when the timings are not being reported.
+
+**Arbitrary grids** for the self-directed and 591 follow-up work: `--grid` adds a
+swept dimension, `--set` fixes a value for every run.
+
+```bash
+# self-directed: raw versus sin/cos encoding at a fixed architecture
+python3 sweep.py --experiment selfdirected \
+    --set hidden-layers=3 --set neurons=256 --grid feature_encoding=raw,sincos
+
+# 591 follow-up: is the deep/narrow deficit capacity or optimizer budget?
+python3 sweep.py --experiment followup --set hidden-layers=3 --set neurons=32 \
+    --grid epochs=1000,3000 --grid batch_size=1000,10000
+```
+
+Sweeps run `--seeds 0,1,2,3,4` by default. A run that diverges or raises is
+recorded and the sweep continues; `--stop-on-error` aborts instead.
+
+Then collect everything into `results.csv`:
+
+```bash
+python3 aggregate.py                          # every experiment
+python3 aggregate.py --experiment gpu_arch    # one experiment
+python3 aggregate.py --sort rmse              # rank conditions by evaluation RMSE
+```
+
+`aggregate.py` writes one CSV row per run — experiment, every condition field,
+seed, status, best epoch, best evaluation RMSE and MSE, `train_time_s`,
+`total_time_s`, parameter count, optimizer steps, any test metrics, and the
+hardware and version provenance — and prints the mean and standard deviation of
+best evaluation RMSE and training time across the five seeds of each condition.
+It also names any condition that is missing seeds and any run that did not
+complete, so a partially finished sweep cannot be mistaken for a complete one.
+
+> Divergence is detected as a non-finite loss. A run can still "fail to train"
+> while staying finite — a very large learning rate can finish with an
+> astronomically large RMSE and `status: "completed"`. Such runs are recorded
+> faithfully and stand out immediately in the summary table; they should be
+> reported as observed rather than quietly dropped.
+
+### 2.5 Methodology notes
+
+These are properties of the implementation that the report needs to state:
+
+- **Normalization.** Per-feature and per-label mean and standard deviation are
+  computed from *the training examples used in that condition only*, and applied
+  unchanged to the evaluation and testing data. Training minimizes MSE on the
+  normalized labels; all reported errors are converted back to liters, which is
+  an exact rescaling (`MSE_liters = MSE_normalized * sigma_y^2`).
+- **Training-data subsets.** The 1,000- and 10,000-example conditions are drawn
+  from one fixed random ordering of the 100,000 training examples
+  (`SUBSET_ORDER_SEED`, independent of the replicate seed), so all five
+  replicates see the same subset and the smaller subset is nested in the larger.
+- **Seeding.** NumPy and PyTorch are seeded *before* the network is constructed,
+  so both initialization and minibatch ordering are reproducible. Two runs with
+  the same configuration and seed produce bit-identical learning curves.
+- **Model selection.** The evaluation set is scored every epoch and the state
+  dict of the best-evaluating epoch is retained via `copy.deepcopy` and restored
+  before any final evaluation. The final epoch is never used by default.
+- **Timing.** `torch.cuda.synchronize()` is called immediately before starting
+  and immediately before stopping the timer. `train_time_s` covers optimizer work
+  only; `total_time_s` additionally includes the per-epoch evaluation passes.
+- **Divergence.** A non-finite loss stops the run and is recorded as
+  `status: "diverged"` with the epoch, rather than silently changing
+  hyperparameters.
+- **Data residency.** The whole dataset (~6 MB) is held in GPU memory for the
+  duration of a run and minibatches are gathered by indexing with
+  `torch.randperm`. No `DataLoader` is used; at this network size, per-batch
+  host-to-device copies would dominate the runtime.
 
 ## 3. Troubleshooting
 
@@ -287,6 +458,9 @@ must be documented in the report.
 |-- requirements.txt           top-level pinned dependencies
 |-- requirements-lock.txt      full transitive lock of the verified environment
 |-- verify_env.py              environment verification script
+|-- make_dataset_npz.py        packs source_data/*.npy into swept_volume_data.npz
+|-- neural_network.py          NeuralNetwork class + single-run training program
+|-- runs/                      one directory per experimental run
 |-- source_data/               local copy of the dataset (.npy), not committed
 |-- venv_gpu/                  virtual environment, not committed
 `-- swept_volume_data.npz      built by make_dataset_npz.py, not committed
