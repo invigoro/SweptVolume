@@ -8,8 +8,9 @@ in PyTorch.
 - **Assignment choice:** GPU — Network Architecture Analysis
 - **Name:** Timothy Wells
 
-> Status: environment setup and the single-run training program are complete.
-> `sweep.py`, `aggregate.py`, `plots.py`, and `final_test.py` are still to come.
+> Status: the full pipeline is implemented and verified. The required GPU sweep
+> and the 591 follow-up conditions have been run. Final held-out testing has not
+> been performed yet.
 
 ---
 
@@ -369,8 +370,40 @@ stored normalization statistics, and reports mean and standard deviation of test
 MSE (liters^2) and test RMSE (liters). It writes `test_metrics.json` into each run
 directory; re-run `aggregate.py` afterwards to fold those into `results.csv`.
 
-`--confirm` is mandatory. Without it the script refuses and exits 2, so the
-held-out data cannot be touched by an absent-minded command.
+**Guards**, so the held-out data cannot be touched by an absent-minded command:
+
+| Situation | Behaviour |
+|---|---|
+| no `--confirm` | prints what *would* be tested, reads nothing, exits 0 |
+| matched runs != 5 | exits 1; override with `--expect-seeds` |
+| `test_metrics.json` already present | exits 2; override with `--replace` |
+
+**Disambiguating a configuration.** `--hidden-layers` and `--neurons` are enough
+within `gpu_arch`, where every other field is fixed. In an experiment that varies
+more than architecture, add `--epochs`, `--batch-size`, `--lr`, `--train-size`, or
+`--feature-encoding` until exactly five runs match. If more than one configuration
+matches, the error names the fields that differ and the flag that narrows each.
+For example, within `followup` both the batch-size and the learning-rate
+conditions run for 1000 epochs, so both flags are needed:
+
+```bash
+python3 final_test.py --experiment followup --hidden-layers 3 --neurons 256 \
+    --epochs 1000 --batch-size 1000 --confirm
+```
+
+**Long runs over SSH.** Final testing takes about a second, but a sweep can run
+for many minutes. Use a persistent session so a dropped connection does not kill
+the job:
+
+```bash
+tmux new -s sweep          # or: screen -S sweep
+# run the command, then detach: Ctrl-b d (tmux) / Ctrl-a d (screen)
+tmux attach -t sweep       # or: screen -r sweep
+```
+
+Or, for fire-and-forget with no reattaching:
+`nohup python3 sweep.py --sweep gpu_arch > sweep.log 2>&1 &`. Either way sweeps
+are resumable: re-running the same command completes only what is missing.
 
 ### 2.7 Methodology notes
 

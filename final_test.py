@@ -91,6 +91,12 @@ def main(argv=None):
                     help="restrict to a feature encoding, if the experiment mixes them")
     ap.add_argument("--epochs", type=int, default=None,
                     help="restrict to an epoch budget, if the experiment mixes them")
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="restrict to a batch size, if the experiment mixes them")
+    ap.add_argument("--lr", type=float, default=None,
+                    help="restrict to a learning rate, if the experiment mixes them")
+    ap.add_argument("--train-size", type=int, default=None,
+                    help="restrict to a training-data size, if the experiment mixes them")
     ap.add_argument("--runs", type=pathlib.Path, default=pathlib.Path("runs"))
     ap.add_argument("--device", default="auto")
     ap.add_argument("--expect-seeds", type=int, default=5,
@@ -106,6 +112,12 @@ def main(argv=None):
         extra["feature_encoding"] = args.feature_encoding
     if args.epochs is not None:
         extra["epochs"] = args.epochs
+    if args.batch_size is not None:
+        extra["batch_size"] = args.batch_size
+    if args.lr is not None:
+        extra["lr"] = args.lr
+    if args.train_size is not None:
+        extra["train_size"] = args.train_size
 
     matches = find_runs(args.runs, args.experiment, args.hidden_layers, args.neurons, extra)
     if not matches:
@@ -122,7 +134,21 @@ def main(argv=None):
     if len(matches) != args.expect_seeds:
         print(f"\nexpected {args.expect_seeds} retained models but found {len(matches)}.",
               file=sys.stderr)
-        print("Pass --expect-seeds to override if this is intentional.", file=sys.stderr)
+        seeds = [m[1]["config"]["seed"] for m in matches]
+        if len(seeds) != len(set(seeds)):
+            # More than one configuration matched, so the selection is ambiguous.
+            # Name the fields that differ, so the user knows what to add.
+            differing = sorted({k for k in ("lr", "batch_size", "epochs", "train_size",
+                                            "feature_encoding", "tag")
+                                if len({str(m[1]["config"].get(k)) for m in matches}) > 1})
+            print("Duplicate seeds: more than one configuration matched. "
+                  "These fields differ between them:", file=sys.stderr)
+            for key in differing:
+                values = sorted({str(m[1]["config"].get(key)) for m in matches})
+                print(f"  {key}: {', '.join(values)}"
+                      f"   (narrow with --{key.replace('_', '-')})", file=sys.stderr)
+        else:
+            print("Pass --expect-seeds to override if this is intentional.", file=sys.stderr)
         return 1
 
     existing = [d for d, _ in matches if (d / "test_metrics.json").exists()]
